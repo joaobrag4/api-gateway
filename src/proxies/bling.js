@@ -97,9 +97,12 @@ router.all("/*", async (req, res) => {
   const path = req.path || "/";
   const method = req.method.toLowerCase();
 
-  // req.rawBody é populado pelo middleware de captura raw no index.js
-  // Para métodos sem body (GET, HEAD, OPTIONS), rawBody é vazio/undefined
-  const rawBody = req.rawBody;
+  // req.body é o Buffer raw capturado pelo express.raw() no index.js
+  // Para GET/HEAD sem body, express.raw() deixa req.body como undefined
+  const rawBody = Buffer.isBuffer(req.body) && req.body.length > 0
+    ? req.body
+    : undefined;
+
   const params = req.query;
 
   try {

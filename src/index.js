@@ -9,32 +9,16 @@ const PORT = process.env.PORT || 3000;
 
 // ─── Captura do Body como Raw Buffer ─────────────────────────────────────────
 //
-// IMPORTANTE: Este middleware deve vir ANTES de qualquer outro parser de body.
+// express.raw() com type "*/*" captura qualquer Content-Type como Buffer.
+// É mais confiável que req.on("data") em ambientes com proxy reverso (Railway).
+// req.body fica como Buffer — repassado diretamente ao Bling via Axios.
 //
-// Por que raw buffer?
-//   - O n8n pode enviar JSON, form-data ou qualquer content-type
-//   - Se usarmos express.json(), o body é re-serializado pelo Axios
-//     e o Content-Type original pode ser perdido ou modificado
-//   - Com raw buffer, repassamos os bytes exatos ao Bling — transparente
-//   - O content-length é recalculado automaticamente pelo Axios
-//
-// req.rawBody fica disponível em todos os proxies downstream.
-//
-app.use((req, res, next) => {
-  const chunks = [];
-
-  req.on("data", (chunk) => chunks.push(chunk));
-
-  req.on("end", () => {
-    req.rawBody = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
-    next();
-  });
-
-  req.on("error", (err) => {
-    console.error("[BODY] Erro ao ler body:", err.message);
-    next(err);
-  });
-});
+app.use(
+  express.raw({
+    type: "*/*",   // captura JSON, form-data, qualquer tipo
+    limit: "10mb", // limite de tamanho do body
+  })
+);
 
 // ─── Middleware Global ────────────────────────────────────────────────────────
 
