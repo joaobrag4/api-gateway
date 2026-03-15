@@ -76,7 +76,7 @@ app.get("/health", async (req, res) => {
     apis: {
       bling: {
         status: "ativo",
-        rateLimit: "3 req/s (distribuído via Redis)",
+        rateLimit: `${process.env.BLING_MAX_REQUESTS || 2} req / ${process.env.BLING_WINDOW_MS || 1000}ms`,
         cache: "GET 5 min TTL",
       },
     },

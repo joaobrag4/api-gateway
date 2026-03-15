@@ -8,23 +8,42 @@
  *
  * Parâmetros do Bottleneck (rate limiter):
  * - maxConcurrent: requisições simultâneas máximas
- * - minTime: intervalo mínimo em ms entre requisições (ex: 334ms = ~3 req/s)
+ * - minTime: intervalo mínimo em ms entre requisições (ex: 500ms = 2 req/s)
  * - reservoir: "créditos" disponíveis no período
- * - reservoirRefreshAmount: créditos reposto a cada refresh
+ * - reservoirRefreshAmount: créditos repostos a cada refresh
  * - reservoirRefreshInterval: intervalo do refresh em ms
+ *
+ * ─── Variáveis de ambiente (Railway) ─────────────────────────────────────────
+ *
+ *  BLING_WINDOW_MS    — janela de tempo em ms        (padrão: 1000 = 1 segundo)
+ *  BLING_MAX_REQUESTS — requisições por janela       (padrão: 2)
+ *
+ *  Exemplo:
+ *    BLING_WINDOW_MS=1000  →  1 segundo
+ *    BLING_MAX_REQUESTS=2  →  2 req/s  →  minTime = 500ms
+ *    BLING_MAX_REQUESTS=3  →  3 req/s  →  minTime = 334ms
  */
+
+// ─── Bling rate limit via env vars ───────────────────────────────────────────
+const blingWindowMs    = parseInt(process.env.BLING_WINDOW_MS    || "1000", 10);
+const blingMaxRequests = parseInt(process.env.BLING_MAX_REQUESTS || "2",    10);
+const blingMinTime     = Math.ceil(blingWindowMs / blingMaxRequests);
+
+console.log(
+  `[CONFIG] Bling rate limit: ${blingMaxRequests} req / ${blingWindowMs}ms` +
+  ` → minTime: ${blingMinTime}ms`
+);
 
 const API_CONFIGS = {
   bling: {
     name: "Bling ERP",
     baseUrl: "https://api.bling.com.br",
-    // 3 requisições por segundo conforme documentação do Bling
     rateLimiter: {
-      maxConcurrent: 3,
-      minTime: 334, // ~3 req/s (1000ms / 3 = 333.33ms)
-      reservoir: 3,
-      reservoirRefreshAmount: 3,
-      reservoirRefreshInterval: 1000, // 1 segundo
+      maxConcurrent: blingMaxRequests,
+      minTime: blingMinTime,
+      reservoir: blingMaxRequests,
+      reservoirRefreshAmount: blingMaxRequests,
+      reservoirRefreshInterval: blingWindowMs,
     },
     // Headers que NÃO devem ser repassados ao destino
     stripHeaders: ["host", "x-api-key", "x-forwarded-for"],
