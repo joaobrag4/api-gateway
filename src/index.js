@@ -16,8 +16,11 @@ require("dotenv").config();
 const express = require("express");
 const morgan = require("morgan");
 const auth = require("./middleware/auth.js");
+const adminAuth = require("./middleware/adminAuth.js");
+const requestLogger = require("./middleware/requestLogger.js");
 const { cache } = require("./middleware/cache.js");
 const blingProxy = require("./proxies/bling.js");
+const adminRoutes = require("./routes/admin.js");
 const { getClient, disconnect } = require("./redis.js");
 
 const app = express();
@@ -45,6 +48,9 @@ app.use(
     ":remote-addr :method :url :status :response-time ms - :res[content-length]"
   )
 );
+
+// ─── Log estruturado para Redis + SSE ─────────────────────────────────────────
+app.use(requestLogger);
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 // Sem autenticação — usado pelo Railway para verificar se o serviço está vivo.
@@ -91,6 +97,10 @@ app.get("/health", async (req, res) => {
 // imediatamente, sem nem chegar ao proxy. Em MISS, deixa passar e captura
 // a resposta para salvar no Redis antes de enviá-la ao cliente.
 //
+// ─── Rotas Admin (Ziva OS) ────────────────────────────────────────────────────
+app.use("/admin", adminAuth, adminRoutes);
+
+// ─── Rotas Proxy por serviço ──────────────────────────────────────────────────
 app.use("/bling", auth, cache("bling"), blingProxy);
 
 // Quando adicionar Melhor Envio:
