@@ -19,8 +19,10 @@ const auth = require("./middleware/auth.js");
 const adminAuth = require("./middleware/adminAuth.js");
 const requestLogger = require("./middleware/requestLogger.js");
 const { cache } = require("./middleware/cache.js");
-const blingProxy = require("./proxies/bling.js");
-const adminRoutes = require("./routes/admin.js");
+const blingProxy          = require("./proxies/bling.js");
+const melhorEnvioProxy    = require("./proxies/melhorenvio.js");
+const melhorRastreioProxy = require("./proxies/melhorrastreio.js");
+const adminRoutes         = require("./routes/admin.js");
 const { getClient, disconnect } = require("./redis.js");
 
 const app = express();
@@ -101,18 +103,16 @@ app.get("/health", async (req, res) => {
 app.use("/admin", adminAuth, adminRoutes);
 
 // ─── Rotas Proxy por serviço ──────────────────────────────────────────────────
-app.use("/bling", auth, cache("bling"), blingProxy);
-
-// Quando adicionar Melhor Envio:
-// const melhorEnvioProxy = require("./proxies/melhorenvio.js");
-// app.use("/melhorenvio", auth, cache("melhorenvio"), melhorEnvioProxy);
+app.use("/bling",          auth, cache("bling"),          blingProxy);
+app.use("/melhorenvio",    auth, cache("melhorenvio"),    melhorEnvioProxy);
+app.use("/melhorrastreio", auth, cache("melhorrastreio"), melhorRastreioProxy);
 
 // ─── 404 ──────────────────────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({
     error: "Rota não encontrada",
     message: `${req.method} ${req.path} não existe neste gateway`,
-    rotasDisponiveis: ["/health", "/bling/*"],
+    rotasDisponiveis: ["/health", "/bling/*", "/melhorenvio/*", "/melhorrastreio/*"],
   });
 });
 
