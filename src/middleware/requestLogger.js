@@ -1,12 +1,11 @@
 /**
  * Middleware de log estruturado de requisições.
  *
- * Intercepta todas as requests e, ao finalizar a resposta, salva um registro
- * estruturado no Redis (gateway:logs, últimas 500 entradas) e emite evento
- * para o stream SSE.
- *
- * Modo degradado: se Redis indisponível, apenas emite o evento em memória
- * (SSE ainda funciona, mas logs não sobrevivem a restarts).
+ * Salva no Redis:
+ *   gateway:logs                           → lista circular das últimas 500 req
+ *   gateway:stats:{service}:processed      → contador total acumulado
+ *   gateway:stats:{service}:errors         → erros totais acumulados
+ *   gateway:daily:{service}:{YYYY-MM-DD}   → contador diário (TTL 8 dias)
  */
 
 const { randomUUID } = require("crypto");
@@ -15,15 +14,18 @@ const emitter = require("../events/emitter");
 
 const REDIS_KEY = "gateway:logs";
 const MAX_LOGS = 500;
+const DAILY_TTL_SECONDS = 8 * 24 * 60 * 60; // 8 dias → 7 dias de histórico visível
 
-// Detecta o serviço a partir do path (ex: /bling/... → "bling")
 function detectService(path) {
   const match = path.match(/^\/([^/]+)/);
   return match ? match[1] : "unknown";
 }
 
+function todayKey() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD em UTC
+}
+
 function requestLogger(req, res, next) {
-  // Ignora health check e rotas admin para não poluir os logs
   if (req.path === "/health" || req.path.startsWith("/admin")) {
     return next();
   }
@@ -34,9 +36,8 @@ function requestLogger(req, res, next) {
   res.on("finish", async () => {
     const durationMs = Date.now() - start;
     const service = detectService(req.path);
-
-    // Detecta se foi servido do cache (o middleware de cache adiciona este header)
     const cached = res.getHeader("X-Cache") === "HIT";
+    const isError = res.statusCode >= 400;
 
     const entry = {
       id,
@@ -49,22 +50,28 @@ function requestLogger(req, res, next) {
       cached,
     };
 
-    // Emite para clientes SSE em tempo real
     emitter.emit("request", entry);
 
-    // Persiste no Redis
     const redis = getClient();
     if (redis) {
       try {
         const json = JSON.stringify(entry);
+        const dailyKey = `gateway:daily:${service}:${todayKey()}`;
+
         const pipeline = redis.pipeline();
+
+        // Log circular
         pipeline.lpush(REDIS_KEY, json);
         pipeline.ltrim(REDIS_KEY, 0, MAX_LOGS - 1);
-        // Incrementa contadores de stats por serviço
+
+        // Contadores totais acumulados
         pipeline.incr(`gateway:stats:${service}:processed`);
-        if (res.statusCode >= 400) {
-          pipeline.incr(`gateway:stats:${service}:errors`);
-        }
+        if (isError) pipeline.incr(`gateway:stats:${service}:errors`);
+
+        // Contador diário (expira em 8 dias para manter 7 dias de histórico)
+        pipeline.incr(dailyKey);
+        pipeline.expire(dailyKey, DAILY_TTL_SECONDS);
+
         await pipeline.exec();
       } catch (err) {
         console.error("[REQUEST LOGGER] Falha ao salvar no Redis:", err.message);
