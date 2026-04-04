@@ -269,4 +269,77 @@ router.get("/stream", (req, res) => {
   });
 });
 
+// ─── Melhor Rastreio — Gerenciamento de Token ──────────────────────────────────
+
+/**
+ * GET /admin/mr/token-status
+ * Verifica se há token no Redis e quanto tempo resta (TTL).
+ */
+router.get("/mr/token-status", async (req, res) => {
+  const redis = getClient();
+  if (!redis) return res.json({ cached: false, reason: "Redis indisponível" });
+
+  try {
+    const [token, ttl] = await Promise.all([
+      redis.get("gateway:mr:access_token"),
+      redis.ttl("gateway:mr:access_token"),
+    ]);
+    const hasRefresh = !!(await redis.exists("gateway:mr:refresh_token"));
+
+    if (!token) return res.json({ cached: false, hasRefresh });
+
+    // Tenta decodificar o JWT para pegar email e exp
+    let email = null;
+    let exp   = null;
+    try {
+      const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64").toString());
+      email = payload.email || payload.preferred_username || null;
+      exp   = payload.exp   || null;
+    } catch { /* ignora */ }
+
+    res.json({ cached: true, ttlSeconds: ttl, hasRefresh, email, exp });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /admin/mr/token
+ * Injeta manualmente um accessToken (e opcionalmente refreshToken) no Redis.
+ * Body: { accessToken: string, refreshToken?: string, expiresInDays?: number }
+ */
+router.post("/mr/token", async (req, res) => {
+  const redis = getClient();
+  if (!redis) return res.status(503).json({ error: "Redis não disponível" });
+
+  let body = req.body;
+  if (Buffer.isBuffer(body)) {
+    try { body = JSON.parse(body.toString()); } catch {
+      return res.status(400).json({ error: "Body inválido — envie JSON" });
+    }
+  }
+
+  const { accessToken, refreshToken, expiresInDays = 28 } = body;
+  if (!accessToken) return res.status(400).json({ error: "accessToken obrigatório" });
+
+  const ttl         = Math.floor(expiresInDays * 24 * 60 * 60);
+  const refreshTtl  = 55 * 24 * 60 * 60;
+
+  await redis.set("gateway:mr:access_token", accessToken, "EX", ttl);
+  if (refreshToken) {
+    await redis.set("gateway:mr:refresh_token", refreshToken, "EX", refreshTtl);
+  }
+
+  // Decodifica para confirmar email/exp
+  let email = null;
+  let exp   = null;
+  try {
+    const payload = JSON.parse(Buffer.from(accessToken.split(".")[1], "base64").toString());
+    email = payload.email || payload.preferred_username || null;
+    exp   = payload.exp   || null;
+  } catch { /* ignora */ }
+
+  res.json({ ok: true, email, exp, expiresInDays, hasRefresh: !!refreshToken });
+});
+
 module.exports = router;
