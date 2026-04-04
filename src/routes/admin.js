@@ -342,4 +342,72 @@ router.post("/mr/token", async (req, res) => {
   res.json({ ok: true, email, exp, expiresInDays, hasRefresh: !!refreshToken });
 });
 
+// ─── Bling — Status do Token ───────────────────────────────────────────────────
+
+/**
+ * GET /admin/bling/token-status
+ * Verifica se há token no Redis e quanto tempo resta (TTL).
+ */
+router.get("/bling/token-status", async (req, res) => {
+  const redis = getClient();
+  if (!redis) return res.json({ cached: false, reason: "Redis indisponível" });
+
+  try {
+    const [token, ttl] = await Promise.all([
+      redis.get("gateway:bling:access_token"),
+      redis.ttl("gateway:bling:access_token"),
+    ]);
+    const hasRefresh = !!(await redis.exists("gateway:bling:refresh_token"));
+
+    if (!token) return res.json({ cached: false, hasRefresh });
+
+    res.json({ cached: true, ttlSeconds: ttl, hasRefresh, tokenPrefix: token.substring(0, 8) + "..." });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /admin/bling/token
+ * Limpa o access_token do Redis, forçando renovação na próxima requisição.
+ */
+router.delete("/bling/token", async (req, res) => {
+  const redis = getClient();
+  if (!redis) return res.status(503).json({ error: "Redis não disponível" });
+
+  try {
+    await redis.del("gateway:bling:access_token");
+    res.json({ ok: true, message: "Token Bling removido do Redis. Será renovado automaticamente na próxima requisição." });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /admin/bling/token
+ * Injeta manualmente um access_token (e opcionalmente refresh_token) no Redis.
+ * Body: { accessToken: string, refreshToken?: string }
+ */
+router.post("/bling/token", async (req, res) => {
+  const redis = getClient();
+  if (!redis) return res.status(503).json({ error: "Redis não disponível" });
+
+  let body = req.body;
+  if (Buffer.isBuffer(body)) {
+    try { body = JSON.parse(body.toString()); } catch {
+      return res.status(400).json({ error: "Body inválido — envie JSON" });
+    }
+  }
+
+  const { accessToken, refreshToken } = body;
+  if (!accessToken) return res.status(400).json({ error: "accessToken obrigatório" });
+
+  await redis.set("gateway:bling:access_token", accessToken, "EX", 21000);
+  if (refreshToken) {
+    await redis.set("gateway:bling:refresh_token", refreshToken, "EX", 180 * 24 * 60 * 60);
+  }
+
+  res.json({ ok: true, tokenPrefix: accessToken.substring(0, 8) + "...", hasRefresh: !!refreshToken });
+});
+
 module.exports = router;

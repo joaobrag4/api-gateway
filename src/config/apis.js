@@ -2,6 +2,10 @@
  * Configuração centralizada das APIs suportadas pelo gateway.
  *
  * ─── Variáveis de ambiente (Railway) ─────────────────────────────────────────
+ *  BLING_CLIENT_ID    — client_id do app OAuth2 Bling
+ *  BLING_CLIENT_SECRET— client_secret do app OAuth2 Bling
+ *  BLING_REFRESH_TOKEN— refresh_token inicial (obtido na primeira autorização)
+ *  BLING_API_TOKEN    — token estático (fallback; usado se OAuth2 não estiver configurado)
  *  BLING_WINDOW_MS    — janela de tempo em ms        (padrão: 1000)
  *  BLING_MAX_REQUESTS — requisições por janela       (padrão: 2)
  *  ME_CLIENT_ID       — Client ID OAuth2 Melhor Envio
@@ -50,7 +54,8 @@ const API_CONFIGS = {
       reservoirRefreshAmount: blingMaxRequests,
       reservoirRefreshInterval: blingWindowMs,
     },
-    stripHeaders: ["host", "x-api-key", "x-forwarded-for"],
+    stripHeaders: ["host", "x-api-key", "x-forwarded-for", "authorization"],
+    // authorization é stripped porque o gateway injeta o Bearer token OAuth2 automaticamente
   },
 
   melhorenvio: {
