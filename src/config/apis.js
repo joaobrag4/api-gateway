@@ -18,9 +18,9 @@ const meWindowMs    = 60_000;
 const meMaxRequests = 250;
 const meMinTime     = Math.ceil(meWindowMs / meMaxRequests);
 
-// Melhor Rastreio: limite não documentado; 60 req/min conservador
+// Melhor Rastreio: ~100 req/s testado em produção — 300 req/min conservador
 const mrWindowMs    = 60_000;
-const mrMaxRequests = 60;
+const mrMaxRequests = 300;
 const mrMinTime     = Math.ceil(mrWindowMs / mrMaxRequests);
 
 console.log(
