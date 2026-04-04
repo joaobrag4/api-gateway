@@ -1,16 +1,16 @@
 /**
  * Proxy da Melhor Rastreio (GraphQL).
  *
- * A Melhor Rastreio usa Keycloak JWT — o gateway gerencia o token
- * automaticamente (cache no Redis, renovação automática via loginLongLivedToken
- * ou Keycloak refresh_token endpoint).
+ * A Melhor Rastreio usa Keycloak JWT. Estratégia de token (em ordem):
+ *  1. Redis cache (access_token, 28 dias)
+ *  2. refreshToken mutation GraphQL (usa refresh_token salvo no Redis)
+ *  3. loginLongLivedToken mutation (username + password — só funciona com conta email/senha)
+ *  4. MR_ACCESS_TOKEN env var (fallback estático — válido 30 dias)
  *
- * ─── Variáveis de ambiente obrigatórias ──────────────────────────────────────
- *  MR_USERNAME — email/usuário da conta Melhor Rastreio
- *  MR_PASSWORD — senha da conta Melhor Rastreio
- *
- * ─── Variável opcional (bypass inicial) ──────────────────────────────────────
- *  MR_ACCESS_TOKEN — token estático para usar sem renovação automática
+ * ─── Variáveis de ambiente (Railway) ─────────────────────────────────────────
+ *  MR_ACCESS_TOKEN — token estático (fallback; corrigir typo: não é MR_ACESS_TOKEN)
+ *  MR_USERNAME     — email da conta com senha própria (não funciona com conta Google)
+ *  MR_PASSWORD     — senha da conta
  *
  * ─── Exemplos de chamadas (do Ziva OS via gateway) ───────────────────────────
  *  POST /melhorrastreio/graphql   { "query": "...", "variables": {...} }
@@ -26,26 +26,15 @@ const router  = Router();
 const config  = API_CONFIGS.melhorrastreio;
 const limiter = getLimiter("melhorrastreio", config.rateLimiter);
 
-// ─── Token — Gerenciamento ────────────────────────────────────────────────────
-
 const TOKEN_REDIS_KEY   = "gateway:mr:access_token";
 const REFRESH_REDIS_KEY = "gateway:mr:refresh_token";
-const TOKEN_TTL_SEC     = 28 * 24 * 60 * 60; // 28 dias (token expira em 30)
-const REFRESH_TTL_SEC   = 60 * 24 * 60 * 60; // 60 dias para o refresh_token
+const TOKEN_TTL_SEC     = 28 * 24 * 60 * 60; // 28 dias
+const REFRESH_TTL_SEC   = 55 * 24 * 60 * 60; // 55 dias
 
-const GRAPHQL_URL   = config.baseUrl + "/graphql";
-const KEYCLOAK_URL  =
-  "https://keycloak-external.melhorenvio.com.br" +
-  "/auth/realms/melhor-rastreio/protocol/openid-connect/token";
+const GRAPHQL_URL = config.baseUrl + "/graphql";
 
-/**
- * Retorna o access token da Melhor Rastreio.
- * Prioridade:
- *  1. Redis cache (access_token)
- *  2. Keycloak refresh_token (se armazenado no Redis)
- *  3. loginLongLivedToken mutation (username + password)
- *  4. MR_ACCESS_TOKEN env var (fallback estático)
- */
+// ─── Token — Gerenciamento ────────────────────────────────────────────────────
+
 async function getAccessToken() {
   const redis = getClient();
 
@@ -57,115 +46,135 @@ async function getAccessToken() {
     } catch { /* ignora */ }
   }
 
-  // 2. Keycloak refresh_token
+  // 2. refreshToken mutation (sem precisar de senha)
   if (redis) {
     try {
       const storedRefresh = await redis.get(REFRESH_REDIS_KEY);
       if (storedRefresh) {
-        const refreshed = await refreshViaKeycloak(storedRefresh, redis);
-        if (refreshed) return refreshed;
+        const result = await callRefreshToken(storedRefresh);
+        if (result) {
+          await cacheTokens(redis, result.accessToken, result.refreshToken, result.expiresIn);
+          return result.accessToken;
+        }
       }
     } catch { /* ignora */ }
   }
 
-  // 3. loginLongLivedToken (username + password)
+  // 3. loginLongLivedToken (só funciona com conta email/senha — não Google OAuth)
   const username = process.env.MR_USERNAME;
   const password = process.env.MR_PASSWORD;
-
   if (username && password) {
-    const token = await loginLongLivedToken(username, password, redis);
-    if (token) return token;
+    try {
+      const result = await callLoginLongLivedToken(username, password);
+      if (result) {
+        await cacheTokens(redis, result.accessToken, result.refreshToken, result.expiresIn);
+        return result.accessToken;
+      }
+    } catch (err) {
+      console.warn("[MR] loginLongLivedToken falhou:", err.message);
+    }
   }
 
-  // 4. Fallback estático
+  // 4. Fallback: MR_ACCESS_TOKEN estático
   const staticToken = process.env.MR_ACCESS_TOKEN;
   if (staticToken) {
-    console.warn("[MR] Usando MR_ACCESS_TOKEN estático (sem renovação automática).");
+    console.warn("[MR] Usando MR_ACCESS_TOKEN estático. Salvar no Redis para evitar expiração.");
+    // Salva no Redis para as próximas requisições (evita ler env toda vez)
+    if (redis) {
+      try { await redis.set(TOKEN_REDIS_KEY, staticToken, "EX", TOKEN_TTL_SEC); } catch { /* ignora */ }
+    }
     return staticToken;
   }
 
   throw new Error(
-    "Melhor Rastreio: nenhuma credencial disponível. " +
-    "Configure MR_USERNAME + MR_PASSWORD ou MR_ACCESS_TOKEN no Railway."
+    "[MR] Nenhuma credencial disponível. " +
+    "Corrija o typo no Railway: MR_ACESS_TOKEN → MR_ACCESS_TOKEN, " +
+    "ou configure MR_USERNAME + MR_PASSWORD (conta com senha, não Google)."
   );
 }
 
-async function refreshViaKeycloak(refreshToken, redis) {
-  try {
-    console.log("[MR] Tentando refresh via Keycloak...");
-    const res = await axios.post(
-      KEYCLOAK_URL,
-      new URLSearchParams({
-        grant_type:    "refresh_token",
-        client_id:     "api",
-        refresh_token: refreshToken,
-      }).toString(),
-      {
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        timeout: 15000,
-      }
-    );
-
-    const { access_token, refresh_token, expires_in } = res.data;
-    if (!access_token) return null;
-
-    const ttl = expires_in ? Math.floor(expires_in * 0.95) : TOKEN_TTL_SEC;
-    await cacheTokens(redis, access_token, refresh_token || refreshToken, ttl);
-    console.log("[MR] Token renovado via Keycloak.");
-    return access_token;
-  } catch (err) {
-    console.warn("[MR] Falha no refresh via Keycloak:", err.message);
-    return null;
-  }
-}
-
-async function loginLongLivedToken(username, password, redis) {
-  try {
-    console.log("[MR] Buscando novo token via loginLongLivedToken...");
-
-    const res = await axios.post(
-      GRAPHQL_URL,
-      {
-        query: `query loginLongLivedToken($username: String!, $password: String!) {
-          loginLongLivedToken(username: $username, password: $password)
-        }`,
-        variables: { username, password },
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "User-Agent": "ZivaOS (tech@zivahealth.com.br)",
-        },
-        timeout: 15000,
-      }
-    );
-
-    const token = res.data?.data?.loginLongLivedToken;
-    if (!token) {
-      console.error("[MR] loginLongLivedToken não retornou token:", res.data?.errors);
-      return null;
+/**
+ * Chama a mutation refreshToken do GraphQL da Melhor Rastreio.
+ * Não requer Bearer auth — usa apenas o refresh_token.
+ */
+async function callRefreshToken(refreshToken) {
+  console.log("[MR] Renovando token via refreshToken mutation...");
+  const res = await axios.post(
+    GRAPHQL_URL,
+    {
+      query: `query refreshToken($token: String!) {
+        refreshToken(token: $token) {
+          accessToken
+          refreshToken
+          expiresIn
+        }
+      }`,
+      variables: { token: refreshToken },
+    },
+    {
+      headers: { "Content-Type": "application/json", "User-Agent": "ZivaOS (tech@zivahealth.com.br)" },
+      timeout: 15000,
     }
+  );
 
-    // Tenta extrair refresh_token se o payload vier com mais dados
-    const refreshToken = res.data?.data?.refreshToken || null;
-    await cacheTokens(redis, token, refreshToken, TOKEN_TTL_SEC);
-    console.log("[MR] Novo token obtido via loginLongLivedToken.");
-    return token;
-  } catch (err) {
-    console.error("[MR] Falha em loginLongLivedToken:", err.message);
+  const data = res.data?.data?.refreshToken;
+  if (!data?.accessToken) {
+    console.warn("[MR] refreshToken mutation não retornou accessToken:", res.data?.errors);
     return null;
   }
+  console.log("[MR] Token renovado via refreshToken mutation.");
+  return data;
 }
 
-async function cacheTokens(redis, accessToken, refreshToken, ttlSeconds) {
+/**
+ * Faz login via loginLongLivedToken.
+ * Atenção: só funciona com contas criadas com email + senha no Melhor Rastreio.
+ * Contas criadas via Google OAuth vão dar timeout (Keycloak tenta federar com Google).
+ */
+async function callLoginLongLivedToken(username, password) {
+  console.log("[MR] Buscando token via loginLongLivedToken...");
+  const res = await axios.post(
+    GRAPHQL_URL,
+    {
+      query: `query loginLongLivedToken($username: String!, $password: String!) {
+        loginLongLivedToken(username: $username, password: $password) {
+          accessToken
+          refreshToken
+          expiresIn
+        }
+      }`,
+      variables: { username, password },
+    },
+    {
+      headers: { "Content-Type": "application/json", "User-Agent": "ZivaOS (tech@zivahealth.com.br)" },
+      timeout: 10000, // 10s — timeout rápido para não travar em contas Google
+    }
+  );
+
+  const data = res.data?.data?.loginLongLivedToken;
+  if (!data?.accessToken) {
+    console.warn("[MR] loginLongLivedToken sem accessToken:", res.data?.errors);
+    return null;
+  }
+  console.log("[MR] Token obtido via loginLongLivedToken.");
+  return data;
+}
+
+async function cacheTokens(redis, accessToken, refreshToken, expiresInSeconds) {
   if (!redis) return;
+  const ttl = expiresInSeconds ? Math.floor(expiresInSeconds * 0.93) : TOKEN_TTL_SEC;
   try {
-    await redis.set(TOKEN_REDIS_KEY, accessToken, "EX", ttlSeconds);
+    await redis.set(TOKEN_REDIS_KEY, accessToken, "EX", ttl);
     if (refreshToken) {
       await redis.set(REFRESH_REDIS_KEY, refreshToken, "EX", REFRESH_TTL_SEC);
     }
   } catch { /* ignora */ }
 }
+
+// ─── Seed inicial: salva o refresh_token do token estático no Redis ───────────
+// Quando MR_ACCESS_TOKEN tem um JWT válido que contém um refresh_token associado,
+// precisamos de uma chamada inicial para popular o Redis. Isso é feito via
+// POST /admin/mr/seed-token no gateway.
 
 // ─── Execução da request ──────────────────────────────────────────────────────
 
@@ -197,13 +206,11 @@ async function executeRequest(method, path, rawHeaders, rawBody) {
     decompress: true,
   });
 
-  // 401 → limpa cache e retenta uma vez
+  // 401 → limpa access_token do Redis e retenta (o refresh_token fica)
   if (response.status === 401) {
-    console.warn("[MR] Token expirado (401). Renovando...");
+    console.warn("[MR] Token expirado (401). Limpando cache e renovando...");
     const redis = getClient();
-    if (redis) {
-      await redis.del(TOKEN_REDIS_KEY).catch(() => {});
-    }
+    if (redis) await redis.del(TOKEN_REDIS_KEY).catch(() => {});
 
     const newToken = await getAccessToken();
     forwardHeaders["authorization"] = `Bearer ${newToken}`;
@@ -234,7 +241,6 @@ router.all("/*", async (req, res) => {
     );
 
     console.log(`[MR] ← ${response.status} | ${method.toUpperCase()} ${path}`);
-
     return res.status(response.status).json(response.data);
   } catch (error) {
     console.error(`[MR] Erro: ${error.message}`);
