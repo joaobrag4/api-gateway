@@ -1,18 +1,12 @@
 /**
  * Configuração centralizada das APIs suportadas pelo gateway.
  *
+ * O gateway é um proxy de rate limiting — não gerencia tokens.
+ * O Ziva OS envia o header Authorization com o token correto em cada request.
+ *
  * ─── Variáveis de ambiente (Railway) ─────────────────────────────────────────
- *  BLING_CLIENT_ID    — client_id do app OAuth2 Bling
- *  BLING_CLIENT_SECRET— client_secret do app OAuth2 Bling
- *  BLING_REFRESH_TOKEN— refresh_token inicial (obtido na primeira autorização)
- *  BLING_API_TOKEN    — token estático (fallback; usado se OAuth2 não estiver configurado)
  *  BLING_WINDOW_MS    — janela de tempo em ms        (padrão: 1000)
  *  BLING_MAX_REQUESTS — requisições por janela       (padrão: 2)
- *  ME_CLIENT_ID       — Client ID OAuth2 Melhor Envio
- *  ME_CLIENT_SECRET   — Client Secret OAuth2 Melhor Envio
- *  MR_USERNAME        — email da conta Melhor Rastreio (Keycloak)
- *  MR_PASSWORD        — senha da conta Melhor Rastreio
- *  MR_ACCESS_TOKEN    — token estático (fallback sem renovação automática)
  */
 
 const blingWindowMs    = parseInt(process.env.BLING_WINDOW_MS    || "1000", 10);
@@ -54,14 +48,14 @@ const API_CONFIGS = {
       reservoirRefreshAmount: blingMaxRequests,
       reservoirRefreshInterval: blingWindowMs,
     },
-    stripHeaders: ["host", "x-api-key", "x-forwarded-for", "authorization"],
-    // authorization é stripped porque o gateway injeta o Bearer token OAuth2 automaticamente
+    // Não stripa authorization — o Ziva OS envia o token
+    stripHeaders: ["host", "x-api-key", "x-forwarded-for"],
   },
 
   melhorenvio: {
     name: "Melhor Envio",
     baseUrl: "https://melhorenvio.com.br",
-    dailyLimit: null, // sem limite diário documentado
+    dailyLimit: null,
     rateLimiter: {
       maxConcurrent: meMaxRequests,
       minTime: meMinTime,
@@ -69,8 +63,8 @@ const API_CONFIGS = {
       reservoirRefreshAmount: meMaxRequests,
       reservoirRefreshInterval: meWindowMs,
     },
-    stripHeaders: ["host", "x-api-key", "x-forwarded-for", "authorization"],
-    // authorization é stripped porque o gateway injeta o Bearer token do OAuth2 automaticamente
+    // Não stripa authorization — o Ziva OS envia o token
+    stripHeaders: ["host", "x-api-key", "x-forwarded-for"],
   },
 
   melhorrastreio: {
@@ -84,8 +78,8 @@ const API_CONFIGS = {
       reservoirRefreshAmount: mrMaxRequests,
       reservoirRefreshInterval: mrWindowMs,
     },
-    stripHeaders: ["host", "x-api-key", "x-forwarded-for", "authorization"],
-    // authorization é stripped porque o gateway injeta o Keycloak JWT automaticamente
+    // Não stripa authorization — o Ziva OS envia o token
+    stripHeaders: ["host", "x-api-key", "x-forwarded-for"],
   },
 };
 
