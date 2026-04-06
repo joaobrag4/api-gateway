@@ -16,9 +16,22 @@ const REDIS_KEY = "gateway:logs";
 const MAX_LOGS = 500;
 const DAILY_TTL_SECONDS = 8 * 24 * 60 * 60; // 8 dias → 7 dias de histórico visível
 
+// Mapeamento explícito: prefixo de rota → nome do serviço no Redis.
+// Garante que "gateway:daily:bling:..." seja incrementado corretamente
+// independente de como o path muda após o mount do proxy.
+const SERVICE_PREFIXES = [
+  { prefix: "/bling",          service: "bling" },
+  { prefix: "/melhorenvio",    service: "melhorenvio" },
+  { prefix: "/melhorrastreio", service: "melhorrastreio" },
+];
+
 function detectService(path) {
+  for (const { prefix, service } of SERVICE_PREFIXES) {
+    if (path.startsWith(prefix)) return service;
+  }
+  // Fallback: primeiro segmento (para rotas não mapeadas explicitamente)
   const match = path.match(/^\/([^/]+)/);
-  return match ? match[1] : "unknown";
+  return match ? match[1].toLowerCase() : "unknown";
 }
 
 function todayKey() {
@@ -35,7 +48,8 @@ function requestLogger(req, res, next) {
 
   res.on("finish", async () => {
     const durationMs = Date.now() - start;
-    const service = detectService(req.path);
+    const resolvedPath = req.originalUrl || req.path;
+    const service = detectService(resolvedPath);
     const cached = res.getHeader("X-Cache") === "HIT";
     const isError = res.statusCode >= 400;
 
